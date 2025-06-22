@@ -4,10 +4,12 @@ export interface Lead {
   company: string
   email: string
   phone?: string
-  status: "pending" | "active" | "completed"
-  activity?: string
-  createdAt: string
+  status: string
+  activity: string
+  createdTime: string
+  modifiedTime: string
 }
+
 
 export interface Column {
   id: string

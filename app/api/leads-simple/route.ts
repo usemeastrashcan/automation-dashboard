@@ -1,118 +1,174 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { zohoCRM } from "@/lib/zoho-crm"
+import { zohoCRM, type ZohoLead, ACTIVITY_MAPPING } from "@/lib/zoho-crm"
 
-// Add memory management
-const MAX_BATCH_SIZE = 50 // Reduce batch size to prevent memory issues
-const CACHE_TTL = 5 * 60 * 1000 // 5 minutes cache
+interface TransformedLead {
+  id: string
+  name: string
+  company: string
+  email: string
+  phone?: string
+  status: "pending" | "active" | "completed"
+  activity?: string
+  createdAt: string
+}
 
-// Simple in-memory cache with size limits
-const cache = new Map<string, { data: any; timestamp: number }>()
-const MAX_CACHE_SIZE = 10
+function transformZohoLead(zohoLead: ZohoLead): TransformedLead {
+  const firstName = zohoLead.First_Name || ""
+  const lastName = zohoLead.Last_Name || ""
+  const fullName = `${firstName} ${lastName}`.trim()
 
-function cleanCache() {
-  if (cache.size >= MAX_CACHE_SIZE) {
-    const oldestKey = cache.keys().next().value
-    cache.delete(oldestKey!)
+  let status: "pending" | "active" | "completed" = "pending"
+  if (zohoLead.Lead_Status) {
+    const leadStatus = zohoLead.Lead_Status.toLowerCase()
+    if (leadStatus.includes("contacted") || leadStatus.includes("qualified")) {
+      status = "active"
+    } else if (leadStatus.includes("converted") || leadStatus.includes("closed")) {
+      status = "completed"
+    }
+  }
+
+  return {
+    id: zohoLead.id,
+    name: fullName || "Unknown",
+    company: zohoLead.Company || "Unknown Company",
+    email: zohoLead.Email || "",
+    phone: zohoLead.Phone,
+    status,
+    activity: zohoLead.Activity,
+    createdAt: zohoLead.Created_Time || new Date().toISOString(),
   }
 }
 
-function getCachedData(key: string) {
-  const cached = cache.get(key)
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data
+function categorizeLeads(leads: TransformedLead[]): { [key: string]: TransformedLead[] } {
+  const categorized: { [key: string]: TransformedLead[] } = {
+    leads: [],
+    questionnaire: [],
+    quotation: [],
+    "details-passed": [],
+    "lost-cases": [],
+    others: [],
   }
-  cache.delete(key)
-  return null
-}
 
-function setCachedData(key: string, data: any) {
-  cleanCache()
-  cache.set(key, { data, timestamp: Date.now() })
+  leads.forEach((lead) => {
+    const activity = lead.activity
+
+    if (!activity) {
+      categorized.others.push(lead)
+      return
+    }
+
+    let categorizedFlag = false
+    for (const [column, activities] of Object.entries(ACTIVITY_MAPPING)) {
+      if (activities.includes(activity)) {
+        categorized[column].push(lead)
+        categorizedFlag = true
+        break
+      }
+    }
+
+    if (!categorizedFlag) {
+      categorized.others.push(lead)
+    }
+  })
+
+  return categorized
 }
 
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const page = Number.parseInt(searchParams.get("page") || "1", 10)
-    const limit = Math.min(Number.parseInt(searchParams.get("limit") || "20", 10), MAX_BATCH_SIZE)
-    const search = searchParams.get("search") || ""
-    const type = searchParams.get("type") || "records"
+    const limit = Number.parseInt(searchParams.get("limit") || "100", 10) // Reduced default
+    const searchTerm = searchParams.get("search") || undefined
+    const type = searchParams.get("type") || "kanban"
 
-    console.log(`API: Simple leads fetch - page: ${page}, type: ${type}`)
+    console.log(
+      `API: Simple leads fetch - page: ${page}, type: ${type}${searchTerm ? `, search: "${searchTerm}"` : ""}`,
+    )
 
-    // Create cache key
-    const cacheKey = `leads-${page}-${limit}-${search}-${type}`
-
-    // Check cache first
-    const cachedResult = getCachedData(cacheKey)
-    if (cachedResult) {
-      console.log(`Using cached leads for page ${page}`)
-      return NextResponse.json(cachedResult)
+    // Validate environment variables
+    if (!process.env.ZOHO_API_BASE_URL) {
+      throw new Error("ZOHO_API_BASE_URL environment variable is not set")
+    }
+    if (!process.env.ZOHO_ACCESS_TOKEN && !process.env.ZOHO_REFRESH_TOKEN) {
+      throw new Error("Neither ZOHO_ACCESS_TOKEN nor ZOHO_REFRESH_TOKEN is set")
     }
 
-    console.log("Using REST API for regular loading")
+    let result: any
+    let method: string
 
-    const result = search
-  ? await zohoCRM.searchLeadsREST(search, page, limit)
-  : await zohoCRM.getLeadsREST(page, limit)
-
-    // Process data in smaller chunks to avoid memory issues
-    const transformedLeads = []
-    const batchSize = 10
-
-    for (let i = 0; i < result.data.length; i += batchSize) {
-      const batch = result.data.slice(i, i + batchSize)
-      const transformedBatch = batch.map((lead: any) => ({
-        id: lead.id,
-        name: `${lead.First_Name || ""} ${lead.Last_Name || ""}`.trim() || "Unknown",
-        company: lead.Company || "No Company",
-        email: lead.Email || "",
-        phone: lead.Phone || "",
-        status: (lead.Lead_Status?.toLowerCase() === "qualified"
-          ? "active"
-          : lead.Lead_Status?.toLowerCase() === "closed"
-            ? "completed"
-            : "pending") as "pending" | "active" | "completed",
-        activity: lead.Lead_Status || "New",
-        createdAt: lead.Created_Time || new Date().toISOString(),
-      }))
-      transformedLeads.push(...transformedBatch)
-
-      // Allow garbage collection between batches
-      if (i % (batchSize * 2) === 0) {
-        await new Promise((resolve) => setImmediate(resolve))
-      }
+    // Use REST API search for search queries, regular REST API for loading
+    if (searchTerm && searchTerm.trim()) {
+      console.log(`Using REST API Search for: "${searchTerm}"`)
+      method = "REST API Search"
+      result = await zohoCRM.searchLeadsREST(searchTerm.trim(), page, Math.min(limit, 200))
+    } else {
+      console.log("Using REST API for regular loading")
+      method = "REST API"
+      result = await zohoCRM.getLeadsREST(page, limit)
     }
 
-    console.log(`Transformed ${transformedLeads.length} leads using REST API`)
+    const transformedLeads = result.data.map(transformZohoLead)
+    console.log(`Transformed ${transformedLeads.length} leads using ${method}`)
 
-    const response = {
-      success: true,
-      leads: transformedLeads,
-      hasMore: result.hasMore,
-      currentPage: page,
-      totalInBatch: transformedLeads.length,
-      search: search || null,
+    // Log first few leads for debugging search
+    if (searchTerm && transformedLeads.length > 0) {
+      console.log(
+        `Search results sample for "${searchTerm}":`,
+        transformedLeads.slice(0, 3).map((lead:any) => ({
+          name: lead.name,
+          email: lead.email,
+          company: lead.company,
+          phone: lead.phone,
+        })),
+      )
     }
 
-    // Cache the result
-    setCachedData(cacheKey, response)
+    if (type === "kanban") {
+      // For kanban board - categorize leads by activity
+      const categorizedLeads = categorizeLeads(transformedLeads)
 
-    console.log(`Records page: returning ${transformedLeads.length} leads using REST API`)
-    return NextResponse.json(response)
+      // Log categorization results
+      console.log(
+        `Kanban categorization:`,
+        Object.entries(categorizedLeads)
+          .map(([key, leads]) => `${key}: ${leads.length}`)
+          .join(", "),
+      )
+
+      return NextResponse.json({
+        success: true,
+        method,
+        categorizedLeads,
+        hasMore: result.hasMore,
+        currentPage: page,
+        totalInBatch: transformedLeads.length,
+        searchTerm: searchTerm || null,
+      })
+    } else {
+      // For records page - return flat list
+      console.log(`Records page: returning ${transformedLeads.length} leads using ${method}`)
+
+      return NextResponse.json({
+        success: true,
+        method,
+        leads: transformedLeads,
+        hasMore: result.hasMore,
+        currentPage: page,
+        totalInBatch: transformedLeads.length,
+        searchTerm: searchTerm || null,
+      })
+    }
   } catch (error) {
     console.error("Simple leads fetch error:", error)
-
-    // Clear cache on error
-    cache.clear()
+    const tokenStatus = zohoCRM.getTokenStatus()
 
     return NextResponse.json(
       {
         success: false,
         error: "Failed to fetch leads",
         message: error instanceof Error ? error.message : "Unknown error",
-        leads: [],
-        hasMore: false,
+        tokenStatus,
       },
       { status: 500 },
     )

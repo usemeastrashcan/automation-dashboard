@@ -44,24 +44,31 @@ export function useSimpleKanban(): UseSimpleKanbanResult {
   const [globalHasMore, setGlobalHasMore] = useState(true)
   const [mounted, setMounted] = useState(false)
 
+  // Use refs to prevent race conditions
+  const initialLoadDone = useRef(false)
   const loadingRef = useRef(false)
   const abortControllerRef = useRef<AbortController | null>(null)
-  const didAutoLoadRef = useRef(false)
 
+  // Stable load function
   const loadBatch = useCallback(async (page: number, isInitial = false) => {
+    // Prevent multiple simultaneous requests
     if (loadingRef.current) {
       console.log("Kanban: Load already in progress, skipping")
       return
     }
 
+    // Cancel any existing request
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
     }
 
+    // Create new abort controller
     abortControllerRef.current = new AbortController()
 
     try {
-      if (isInitial) setLoading(true)
+      if (isInitial) {
+        setLoading(true)
+      }
       loadingRef.current = true
       setError(null)
 
@@ -71,21 +78,29 @@ export function useSimpleKanban(): UseSimpleKanbanResult {
         signal: abortControllerRef.current.signal,
       })
 
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
 
       const data = await response.json()
 
-      if (!data.success) throw new Error(data.message || "Failed to load leads")
+      if (!data.success) {
+        throw new Error(data.message || "Failed to load leads")
+      }
 
+      // Only update if request wasn't aborted
       if (!abortControllerRef.current.signal.aborted) {
         setColumns((prevColumns) =>
           prevColumns.map((col) => {
             const newLeads = data?.categorizedLeads?.[col.id] || []
             const existingLeads = isInitial ? [] : col.leads
 
+            // Combine and deduplicate leads
             const allLeads = [...existingLeads, ...newLeads]
             const uniqueLeads = new Map()
-            allLeads.forEach((lead) => uniqueLeads.set(lead.id, lead))
+            allLeads.forEach((lead) => {
+              uniqueLeads.set(lead.id, lead)
+            })
 
             return {
               ...col,
@@ -98,18 +113,22 @@ export function useSimpleKanban(): UseSimpleKanbanResult {
 
         setGlobalHasMore(data.hasMore)
         setCurrentPage(page)
-        console.log(`Kanban: Loaded batch ${page}, hasMore: ${data.hasMore}`)
+
+        console.log(`Kanban: Successfully loaded batch ${page}, hasMore: ${data.hasMore}`)
       }
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
         console.log("Kanban request was aborted")
         return
       }
-      const message = err instanceof Error ? err.message : "Failed to load kanban data"
-      setError(message)
-      console.error("Kanban error:", message)
+
+      const errorMessage = err instanceof Error ? err.message : "Failed to load kanban data"
+      setError(errorMessage)
+      console.error("Kanban error:", errorMessage)
     } finally {
-      if (isInitial) setLoading(false)
+      if (isInitial) {
+        setLoading(false)
+      }
       loadingRef.current = false
     }
   }, [])
@@ -133,7 +152,6 @@ export function useSimpleKanban(): UseSimpleKanbanResult {
 
   const refetch = useCallback(() => {
     console.log("Kanban: Manual refetch triggered")
-    didAutoLoadRef.current = false
     setCurrentPage(1)
     setGlobalHasMore(true)
     setColumns(
@@ -147,18 +165,27 @@ export function useSimpleKanban(): UseSimpleKanbanResult {
     loadBatch(1, true)
   }, [loadBatch])
 
+  // Mount effect - runs once
   useEffect(() => {
     setMounted(true)
   }, [])
 
+  // Auto-load effect - runs when mounted
   useEffect(() => {
-    if (mounted && !loadingRef.current && !error && !didAutoLoadRef.current) {
-      console.log("Kanban: Auto-loading initial data")
-      didAutoLoadRef.current = true
-      loadBatch(1, true)
-    }
-  }, [mounted, error, loadBatch])
+  if (
+    mounted &&
+    !loadingRef.current &&
+    columns.every((col) => col.leads.length === 0) &&
+    !error &&
+    !initialLoadDone.current
+  ) {
+    console.log("Kanban: Auto-loading initial data")
+    initialLoadDone.current = true
+    loadBatch(1, true)
+  }
+}, [mounted, columns, error, loadBatch])
 
+  // Cleanup effect
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {

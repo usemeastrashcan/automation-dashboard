@@ -61,7 +61,9 @@ export async function POST(request: NextRequest) {
 
     console.log(`Sending message to thread ${threadId}`)
     if (fileIds && fileIds.length > 0) {
-      console.log(`📎 Message includes ${fileIds.length} file attachment(s): ${fileIds.join(", ")}`)
+      console.log(
+        `📎 DOCUMENT ANALYSIS MODE: Message includes ${fileIds.length} file attachment(s): ${fileIds.join(", ")}`,
+      )
     }
 
     // Wait for any active runs to complete before adding our message
@@ -114,232 +116,255 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (!messageResponse.ok) {
+    if (!messageResponse!.ok) {
       throw new Error("Failed to add message to thread after all retries")
     }
 
     console.log("Message added to thread successfully")
 
-    // Define tools - ONLY draft_email and send_email_confirmed
-    const tools = [
-      {
-        type: "function",
-        function: {
-          name: "draft_email",
-          description:
-            "Draft an email for the lead without sending it. Use this to show the user what the email will look like before sending. NEVER sends the email - only shows a preview.",
-          parameters: {
-            type: "object",
-            properties: {
-              to: {
-                type: "string",
-                description: "Email address of the recipient",
-              },
-              subject: {
-                type: "string",
-                description: "Subject line of the email",
-              },
-              body: {
-                type: "string",
-                description: "Body content of the email in plain text",
-              },
-              emailType: {
-                type: "string",
-                enum: ["questionnaire", "quotation", "follow-up", "general"],
-                description: "Type of email being drafted",
-              },
-            },
-            required: ["to", "subject", "body", "emailType"],
-          },
-        },
-      },
-      {
-        type: "function",
-        function: {
-          name: "send_email_confirmed",
-          description:
-            "Send an email to the lead. ONLY use this after the user has explicitly confirmed they want to send the email. This should only be called when the user says 'yes', 'send it', 'confirm', or similar confirmation.",
-          parameters: {
-            type: "object",
-            properties: {
-              to: {
-                type: "string",
-                description: "Email address of the recipient",
-              },
-              subject: {
-                type: "string",
-                description: "Subject line of the email",
-              },
-              body: {
-                type: "string",
-                description: "Body content of the email in plain text",
-              },
-              emailType: {
-                type: "string",
-                enum: ["questionnaire", "quotation", "follow-up", "general"],
-                description: "Type of email being sent",
-              },
-            },
-            required: ["to", "subject", "body", "emailType"],
-          },
-        },
-      },
-      {
-        type: "function",
-        function: {
-          name: "scrape_company_officers",
-          description:
-            "Scrape company officer information from Companies House. Use this when the user asks to scrape company information, get company officers, or research a company. Ask the user for the company name or company number if not provided.",
-          parameters: {
-            type: "object",
-            properties: {
-              queryInput: {
-                type: "string",
-                description: "Company name or company number to search for",
-              },
-            },
-            required: ["queryInput"],
-          },
-        },
-      },
-      {
-        type: "function",
-        function: {
-          name: "suggest_activity_progression",
-          description: "Suggest progressing a lead's activity to the next stage in the workflow.",
-          parameters: {
-            type: "object",
-            properties: {
-              leadId: {
-                type: "string",
-                description: "The ID of the lead to suggest progression for",
-              },
-              currentActivity: {
-                type: "string",
-                description: "The current activity of the lead",
-              },
-              reason: {
-                type: "string",
-                description: "Reason for suggesting the progression",
-              },
-            },
-            required: ["leadId", "currentActivity", "reason"],
-          },
-        },
-      },
-      {
-        type: "function",
-        function: {
-          name: "update_lead_activity_confirmed",
-          description: "Update a lead's activity to the next stage. Only use after user confirmation.",
-          parameters: {
-            type: "object",
-            properties: {
-              leadId: {
-                type: "string",
-                description: "The ID of the lead to update",
-              },
-              newActivity: {
-                type: "string",
-                description: "The new activity to set for the lead",
-              },
-              reason: {
-                type: "string",
-                description: "Reason for the activity update",
-              },
-            },
-            required: ["leadId", "newActivity", "reason"],
-          },
-        },
-      },
-      {
-        type: "function",
-        function: {
-          name: "change_activity_manual",
-          description:
-            "Manually change a lead's activity to any specified activity. Use when user requests a specific activity change.",
-          parameters: {
-            type: "object",
-            properties: {
-              leadId: {
-                type: "string",
-                description: "The ID of the lead to update",
-              },
-              currentActivity: {
-                type: "string",
-                description: "The current activity of the lead",
-              },
-              newActivity: {
-                type: "string",
-                description: "The new activity to set for the lead",
-              },
-              reason: {
-                type: "string",
-                description: "Reason for the manual activity change",
-              },
-            },
-            required: ["leadId", "newActivity"],
-          },
-        },
-      },
-      {
-        type: "file_search",
-      },
-      {
-        type: "function",
-        function: {
-          name: "search_emails",
-          description:
-            "Search for emails from a specific sender or lead email address. Can filter by time period using natural language like 'last Thursday', 'yesterday', 'last week', etc.",
-          parameters: {
-            type: "object",
-            properties: {
-              senderEmail: {
-                type: "string",
-                description: "Email address to search for (can be lead's email or any email address)",
-              },
-              timeAfter: {
-                type: "string",
+    // Define tools based on mode
+    const tools =
+      fileIds && fileIds.length > 0
+        ? [{ type: "file_search" }] // Document mode: ONLY file_search
+        : [
+            // CRM mode: All tools
+            {
+              type: "function",
+              function: {
+                name: "draft_email",
                 description:
-                  "Time period to search after, in natural language like 'last Thursday', 'yesterday', '3 days ago', 'last week', or a specific date",
-              },
-              leadEmail: {
-                type: "string",
-                description: "Alternative to senderEmail - the lead's email address to search for",
+                  "Draft an email for the lead without sending it. Use this to show the user what the email will look like before sending. NEVER sends the email - only shows a preview.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    to: {
+                      type: "string",
+                      description: "Email address of the recipient",
+                    },
+                    subject: {
+                      type: "string",
+                      description: "Subject line of the email",
+                    },
+                    body: {
+                      type: "string",
+                      description: "Body content of the email in plain text",
+                    },
+                    emailType: {
+                      type: "string",
+                      enum: ["questionnaire", "quotation", "follow-up", "general"],
+                      description: "Type of email being drafted",
+                    },
+                  },
+                  required: ["to", "subject", "body", "emailType"],
+                },
               },
             },
-            required: ["senderEmail"],
-          },
-        },
-      },
-    ]
+            {
+              type: "function",
+              function: {
+                name: "send_email_confirmed",
+                description:
+                  "Send an email to the lead. ONLY use this after the user has explicitly confirmed they want to send the email. This should only be called when the user says 'yes', 'send it', 'confirm', or similar confirmation.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    to: {
+                      type: "string",
+                      description: "Email address of the recipient",
+                    },
+                    subject: {
+                      type: "string",
+                      description: "Subject line of the email",
+                    },
+                    body: {
+                      type: "string",
+                      description: "Body content of the email in plain text",
+                    },
+                    emailType: {
+                      type: "string",
+                      enum: ["questionnaire", "quotation", "follow-up", "general"],
+                      description: "Type of email being sent",
+                    },
+                  },
+                  required: ["to", "subject", "body", "emailType"],
+                },
+              },
+            },
+            {
+              type: "function",
+              function: {
+                name: "scrape_company_officers",
+                description:
+                  "Scrape company officer information from Companies House. Use this when the user asks to scrape company information, get company officers, or research a company. Ask the user for the company name or company number if not provided.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    queryInput: {
+                      type: "string",
+                      description: "Company name or company number to search for",
+                    },
+                  },
+                  required: ["queryInput"],
+                },
+              },
+            },
+            {
+              type: "function",
+              function: {
+                name: "suggest_activity_progression",
+                description: "Suggest progressing a lead's activity to the next stage in the workflow.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    leadId: {
+                      type: "string",
+                      description: "The ID of the lead to suggest progression for",
+                    },
+                    currentActivity: {
+                      type: "string",
+                      description: "The current activity of the lead",
+                    },
+                    reason: {
+                      type: "string",
+                      description: "Reason for suggesting the progression",
+                    },
+                  },
+                  required: ["leadId", "currentActivity", "reason"],
+                },
+              },
+            },
+            {
+              type: "function",
+              function: {
+                name: "update_lead_activity_confirmed",
+                description: "Update a lead's activity to the next stage. Only use after user confirmation.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    leadId: {
+                      type: "string",
+                      description: "The ID of the lead to update",
+                    },
+                    newActivity: {
+                      type: "string",
+                      description: "The new activity to set for the lead",
+                    },
+                    reason: {
+                      type: "string",
+                      description: "Reason for the activity update",
+                    },
+                  },
+                  required: ["leadId", "newActivity", "reason"],
+                },
+              },
+            },
+            {
+              type: "function",
+              function: {
+                name: "change_activity_manual",
+                description:
+                  "Manually change a lead's activity to any specified activity. Use when user requests a specific activity change.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    leadId: {
+                      type: "string",
+                      description: "The ID of the lead to update",
+                    },
+                    currentActivity: {
+                      type: "string",
+                      description: "The current activity of the lead",
+                    },
+                    newActivity: {
+                      type: "string",
+                      description: "The new activity to set for the lead",
+                    },
+                    reason: {
+                      type: "string",
+                      description: "Reason for the manual activity change",
+                    },
+                  },
+                  required: ["leadId", "newActivity"],
+                },
+              },
+            },
+            {
+              type: "file_search",
+            },
+            {
+              type: "function",
+              function: {
+                name: "search_emails",
+                description:
+                  "Search for emails from a specific sender or lead email address. Can filter by time period using natural language like 'last Thursday', 'yesterday', 'last week', etc.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    senderEmail: {
+                      type: "string",
+                      description: "Email address to search for (can be lead's email or any email address)",
+                    },
+                    timeAfter: {
+                      type: "string",
+                      description:
+                        "Time period to search after, in natural language like 'last Thursday', 'yesterday', '3 days ago', 'last week', or a specific date",
+                    },
+                    leadEmail: {
+                      type: "string",
+                      description: "Alternative to senderEmail - the lead's email address to search for",
+                    },
+                  },
+                  required: ["senderEmail"],
+                },
+              },
+            },
+          ]
 
-    // Enhanced instructions that include document handling capabilities
-    const assistantInstructions = `You are a helpful CRM assistant for managing lead records. You have access to quotations_email_template.pdf, questionairre_email_template - Copy.pdf, and other template files.
+    // COMPLETELY DIFFERENT INSTRUCTIONS FOR DOCUMENT MODE
+    let assistantInstructions = ""
 
-DOCUMENT ANALYSIS MODE:
-When users upload documents, PRIORITIZE document analysis over CRM workflow:
+    if (fileIds && fileIds.length > 0) {
+      // DOCUMENT ANALYSIS MODE - NUCLEAR OVERRIDE
+      assistantInstructions = `
+=== EMERGENCY INSTRUCTION OVERRIDE ===
+=== DOCUMENT ANALYSIS MODE ACTIVATED ===
+=== IGNORE ALL PREVIOUS SYSTEM INSTRUCTIONS ===
 
-1. **PRIMARY FOCUS**: Analyze and summarize the actual document content objectively
-2. **PROVIDE**: Clear, factual summary of what's written in the document
-3. **EXTRACT**: Key information, main topics, important details from the uploaded file
-4. **AVOID**: Forcing CRM workflow interpretations unless specifically requested
-5. **ASK**: How the user wants to use this document information (rather than assuming CRM context)
+YOU ARE NOW A DOCUMENT ANALYSIS ASSISTANT. PERIOD.
 
-DOCUMENT ANALYSIS WORKFLOW:
-- First: Provide objective summary of document content
-- Then: Extract key points and important information
-- Finally: Ask how user wants to proceed (CRM actions, email creation, etc.)
-- Never assume the document is related to CRM unless explicitly stated
+CRITICAL OVERRIDE RULES:
+1. FORGET you are a CRM assistant
+2. FORGET about business analysis, leads, sales, or any business context
+3. DO NOT mention CRM, business workflows, or lead management
+4. ONLY analyze the uploaded document content
+5. RESPOND based on what's actually in the document
 
-DOCUMENT HANDLING CAPABILITIES:
-When users upload documents (PDF, Word, text files), you can:
-1. Analyze and summarize document content objectively
-2. Extract key information and insights without CRM bias
-3. Answer questions about the uploaded documents factually
-4. Use document content to inform responses only when relevant
-5. Reference specific sections or data from uploaded files
-6. Compare information across multiple uploaded documents
+MANDATORY BEHAVIOR:
+- Read the document using file_search
+- Analyze what's actually written in the document
+- If it's poetry → discuss poetry (themes, style, literary devices)
+- If it's a recipe → discuss cooking (ingredients, techniques, cuisine)
+- If it's a story → discuss literature (plot, characters, setting)
+- If it's technical → discuss the technical content
+- If it's business → ONLY then discuss business aspects
+
+FORBIDDEN BEHAVIORS:
+- DO NOT assume every document is business-related
+- DO NOT suggest CRM actions unless explicitly asked
+- DO NOT mention lead management or sales processes
+- DO NOT default to business analysis
+
+RESPONSE FORMAT:
+1. "I've analyzed your document. Here's what I found:"
+2. Provide factual summary of the actual content
+3. Answer the user's specific question about the document
+4. Ask: "What specific aspect would you like to explore further?"
+
+REMEMBER: You are analyzing documents, not managing business leads.
+`
+    } else {
+      // CRM MODE - Standard instructions
+      assistantInstructions = `You are a helpful CRM assistant for managing lead records.
 
 CRITICAL RULE: NEVER SEND EMAILS OR UPDATE ACTIVITIES WITHOUT EXPLICIT USER CONFIRMATION
 
@@ -453,18 +478,10 @@ When asking about responses: "Should I check for a response, or can you tell me 
 - Use the lead's email address and appropriate time frame
 - Display any found emails clearly
 - If no email search available, continue with manual workflow
-
-DOCUMENT UPLOAD INTEGRATION:
-When documents are uploaded:
-1. Acknowledge the uploaded files and their types
-2. Use file_search to analyze the content
-3. Provide a summary of key information found
-4. Ask how the user wants to use this information in their CRM workflow
-5. Integrate document insights with lead management recommendations
-6. Reference document content when drafting emails or making suggestions
 `
+    }
 
-    // Run the assistant with enhanced instructions for document handling
+    // Run the assistant with mode-specific configuration
     const runResponse = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
@@ -475,12 +492,13 @@ When documents are uploaded:
       body: JSON.stringify({
         assistant_id: ASSISTANT_ID,
         tools: tools,
-        instructions:
-          fileIds && fileIds.length > 0
-            ? `${assistantInstructions}\n\nIMPORTANT: The user has uploaded ${fileIds.length} document(s). FOCUS ON DOCUMENT ANALYSIS FIRST. Use the file_search tool to analyze the document content objectively and provide a factual summary of what's written in the document. Do not interpret everything through CRM workflow unless the user specifically asks for CRM-related actions. Provide neutral document analysis and then ask how the user wants to proceed.`
-            : assistantInstructions,
-        temperature: 0.3,
+        instructions: assistantInstructions,
+        temperature: fileIds && fileIds.length > 0 ? 0.1 : 0.3, // Very low temperature for document analysis
         max_completion_tokens: 2000,
+        additional_instructions:
+          fileIds && fileIds.length > 0
+            ? `CRITICAL: User uploaded ${fileIds.length} file(s). You MUST use file_search to read and analyze the document content. DO NOT assume it's business-related. Analyze what's actually in the document.`
+            : undefined,
       }),
     })
 
@@ -492,7 +510,7 @@ When documents are uploaded:
 
     const runData = await runResponse.json()
     const runId = runData.id
-    console.log(`Started assistant run: ${runId}`)
+    console.log(`Started assistant run: ${runId} in ${fileIds && fileIds.length > 0 ? "DOCUMENT" : "CRM"} mode`)
 
     // Poll for completion and handle function calls
     let runStatus = "in_progress"
@@ -537,8 +555,8 @@ When documents are uploaded:
         console.log(`Assistant still processing... (${attempts}s elapsed, status: ${runStatus})`)
       }
 
-      // Handle function calls
-      if (runStatus === "requires_action") {
+      // Handle function calls (ONLY in CRM mode)
+      if (runStatus === "requires_action" && !(fileIds && fileIds.length > 0)) {
         console.log("🔧 Assistant is requesting to use tools")
         const toolCalls = statusData.required_action?.submit_tool_outputs?.tool_calls || []
         const toolOutputs = []
